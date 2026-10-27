@@ -299,14 +299,16 @@ Every field of `Settings` can be overridden with a `TF_*` environment variable o
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `TF_DEVICE` | `cuda` | `cpu`, `cuda` or `auto` |
+| `TF_DEVICE` | `cpu` | `cpu`, `cuda` or `auto` |
 | `TF_STORE_IDS` | `["CA_1", "TX_1", "WI_1"]` | M5 stores |
 | `TF_DEPT_ID` | `FOODS_3` | M5 department |
 | `TF_N_WINDOWS` | `3` | number of 28-day backtest origins |
 | `TF_HOLIDAY_CUTOFFS` | `["2015-06-21", "2015-11-22", "2015-12-20"]` | holiday origins |
 | `TF_TIMESTRAL_MAX_CONTEXT` | `1024` | days of history passed to Timestral |
+| `TF_TIMESTRAL_BATCH_SIZE` | `64` | batch elements per forward pass; lower it if memory runs out |
 | `TF_TIMESTRAL_COVARIATE_MODELS` | `["mistralai/Timestral-28M"]` | checkpoints also run with covariates |
 | `TF_TIMESTRAL_MASK_CONSTANT_PRICE` | `true` | ignore the price of series where it never moved in the context |
+| `TF_TIMESTRAL_SYMMETRIC_AVERAGING_WITH_COVARIATES` | `true` | keep Timestral's mirrored pass in the covariate runs |
 | `TF_TIMESTRAL_GROUP_SIZE` | `4` | variates per group in the multivariate run |
 | `TF_N_JOBS` | `16` | statsforecast and LightGBM workers |
 
