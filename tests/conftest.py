@@ -41,7 +41,11 @@ def make_covariates() -> Callable[[pd.DataFrame], pd.DataFrame]:
                         "ds": dates,
                         "sell_price": 2.0,
                         "snap": (dates.day <= 10).astype("float32"),
-                        "is_event": 0.0,
+                        "is_event": (dates.day == 3).astype("float32"),
+                        "event_name": pd.Categorical(
+                            np.where(dates.day == 3, "Christmas", "none")
+                        ),
+                        "event_type": pd.Categorical(np.where(dates.day == 3, "National", "none")),
                     }
                 )
             )

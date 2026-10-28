@@ -18,6 +18,7 @@ def _write_fake_m5(path: Path) -> Path:
         {
             "date": dates.strftime("%Y-%m-%d"),
             "wm_yr_wk": 11101 + np.arange(N_DAYS) // 7,
+            "event_name_1": [None] * (N_DAYS - 1) + ["Christmas"],
             "event_type_1": [None] * (N_DAYS - 1) + ["National"],
             "snap_CA": (dates.day <= 10).astype(int),
             "snap_TX": 0,
@@ -60,6 +61,10 @@ def test_load_m5_subset_filters_and_builds_long_frames(tmp_path: Path) -> None:
     assert set(data.s_df["unique_id"]) == {"FOODS_3_001_CA_1", "FOODS_3_002_CA_1"}
     assert len(data.y_df) == 2 * N_DAYS
     assert data.x_df["is_event"].sum() == 2  # last day, both series
+    assert data.x_df["event_name"].value_counts().to_dict() == {
+        "none": 2 * (N_DAYS - 1),
+        "Christmas": 2,
+    }
     assert data.x_df.loc[data.x_df["unique_id"] == "FOODS_3_002_CA_1", "sell_price"].isna().all()
     assert data.x_df.loc[data.x_df["ds"] == "2011-01-29", "snap"].eq(0).all()  # day 29 > 10
 
@@ -92,3 +97,16 @@ def test_download_m5_existing_file_is_not_downloaded(tmp_path: Path) -> None:
     (tmp_path / "m5.zip").write_bytes(b"x")
 
     assert download_m5("https://invalid.example/m5.zip", raw_dir=tmp_path) == tmp_path / "m5.zip"
+
+
+def test_load_or_build_rebuilds_cache_without_event_name(tmp_path: Path) -> None:
+    zip_path = _write_fake_m5(tmp_path / "m5.zip")
+    cache_dir = tmp_path / "cache"
+    first = load_or_build(zip_path, cache_dir=cache_dir, dept_id="FOODS_3", store_ids=("CA_1",))
+    x_path = next(cache_dir.glob("*_x.parquet"))
+    first.x_df.drop(columns="event_name").to_parquet(x_path, index=False)
+
+    second = load_or_build(zip_path, cache_dir=cache_dir, dept_id="FOODS_3", store_ids=("CA_1",))
+
+    assert "event_name" in second.x_df.columns
+    assert "event_name" in pd.read_parquet(x_path).columns

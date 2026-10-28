@@ -14,6 +14,7 @@ from timestral_forecast.exceptions import DataNotFoundError
 logger = logging.getLogger(__name__)
 
 ID_COLS = ["item_id", "dept_id", "cat_id", "store_id", "state_id"]
+X_COLS = ["unique_id", "ds", "sell_price", "snap", "is_event", "event_type", "event_name"]
 
 
 @dataclass(frozen=True)
@@ -25,7 +26,8 @@ class M5Data:
     y_df : pd.DataFrame
         Target with columns `unique_id, ds, y`.
     x_df : pd.DataFrame
-        Covariates known in advance: `unique_id, ds, sell_price, snap, is_event, event_type`.
+        Covariates known in advance: `unique_id, ds, sell_price, snap, is_event, event_type,
+        event_name` (the two event columns are categorical, "none" on days without event).
     s_df : pd.DataFrame
         Static attributes, one row per `unique_id`.
     """
@@ -81,12 +83,13 @@ def _sales_long(sales: pd.DataFrame, calendar: pd.DataFrame) -> pd.DataFrame:
 
 
 def _covariates(long: pd.DataFrame, calendar: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
-    """Build the known-in-advance covariates: price, SNAP day, event flag and type."""
+    """Build the known-in-advance covariates: price, SNAP day, event flag, type and name."""
     cal = calendar.assign(ds=pd.to_datetime(calendar["date"]))
     x = long[["unique_id", "ds", "item_id", "store_id", "state_id", "wm_yr_wk"]].merge(
         prices, on=["store_id", "item_id", "wm_yr_wk"], how="left"
     )
-    x = x.merge(cal[["ds", "event_type_1", "snap_CA", "snap_TX", "snap_WI"]], on="ds", how="left")
+    cal_cols = ["ds", "event_name_1", "event_type_1", "snap_CA", "snap_TX", "snap_WI"]
+    x = x.merge(cal[cal_cols], on="ds", how="left")
     snap = np.select(
         condlist=[x["state_id"] == s for s in ("CA", "TX", "WI")],
         choicelist=[x["snap_CA"], x["snap_TX"], x["snap_WI"]],
@@ -100,6 +103,7 @@ def _covariates(long: pd.DataFrame, calendar: pd.DataFrame, prices: pd.DataFrame
             "snap": snap.astype("float32"),
             "is_event": x["event_type_1"].notna().astype("float32"),
             "event_type": x["event_type_1"].fillna("none").astype("category"),
+            "event_name": x["event_name_1"].fillna("none").astype("category"),
         }
     )
 
@@ -156,6 +160,8 @@ def load_or_build(
 ) -> M5Data:
     """Return the subset from the parquet cache, building it on first call.
 
+    A cache written before a covariate column was added (see `X_COLS`) is rebuilt.
+
     Parameters
     ----------
     zip_path : Path
@@ -175,7 +181,10 @@ def load_or_build(
     tag = f"{dept_id}_{'-'.join(store_ids)}"
     paths = {name: cache_dir / f"m5_{tag}_{name}.parquet" for name in ("y", "x", "s")}
     if all(p.exists() for p in paths.values()):
-        return M5Data(*(pd.read_parquet(paths[name]) for name in ("y", "x", "s")))
+        cached = M5Data(*(pd.read_parquet(paths[name]) for name in ("y", "x", "s")))
+        if set(X_COLS) <= set(cached.x_df.columns):
+            return cached
+        logger.info("Rebuilding stale M5 cache", extra={"path": str(paths["x"])})
     data = load_m5_subset(zip_path, dept_id=dept_id, store_ids=store_ids)
     cache_dir.mkdir(parents=True, exist_ok=True)
     for name, frame in zip(("y", "x", "s"), (data.y_df, data.x_df, data.s_df), strict=True):

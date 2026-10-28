@@ -9,6 +9,8 @@ from timestral_forecast.exceptions import ShapeMismatchError
 
 KNOWN_COVARIATES = ("sell_price", "snap", "is_event")
 CALENDAR_COVARIATES = ("dow_sin", "dow_cos", "doy_sin", "doy_cos")
+# event name and type as category codes, in place of the single 0/1 `is_event` row
+EVENT_CATEGORIES = ("event_name", "event_type")
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,11 @@ class TimestralInputs:
         The H forecast dates.
     past_covariates : np.ndarray | None
         `(B, P, T)` covariates observed over the context only, or None.
+    categorical_covariates : np.ndarray | None
+        `(B, K, T + H)` category codes known over context and horizon, or None; Timestral
+        target-encodes them per series.
+    categorical_names : tuple[str, ...]
+        Names of the K categorical rows.
     """
 
     unique_ids: np.ndarray
@@ -38,6 +45,8 @@ class TimestralInputs:
     covariate_names: tuple[str, ...]
     future_ds: pd.DatetimeIndex
     past_covariates: np.ndarray | None = None
+    categorical_covariates: np.ndarray | None = None
+    categorical_names: tuple[str, ...] = ()
 
     @property
     def context_ds(self) -> pd.DatetimeIndex:
@@ -211,6 +220,8 @@ def _covariate_tensor(
     x_df: pd.DataFrame, unique_ids: pd.Index, dates: pd.DatetimeIndex, columns: tuple[str, ...]
 ) -> np.ndarray:
     """Stack per-series covariates `(B, len(columns), len(dates))`; NaN where unknown."""
+    if not columns:
+        return np.empty((len(unique_ids), 0, len(dates)), dtype=np.float32)
     window = x_df[x_df["ds"].between(dates[0], dates[-1])]
     rows = [
         window.pivot(index="unique_id", columns="ds", values=col).reindex(
@@ -221,6 +232,15 @@ def _covariate_tensor(
     return np.stack([r.to_numpy(dtype=np.float32) for r in rows], axis=1)
 
 
+def _category_codes(x_df: pd.DataFrame, columns: tuple[str, ...]) -> pd.DataFrame:
+    """Replace categorical columns by integer codes shared by every series; missing stays NaN."""
+    codes = {}
+    for col in columns:
+        raw = pd.Categorical(x_df[col]).codes
+        codes[col] = np.where(raw >= 0, raw, np.nan)
+    return x_df[["unique_id", "ds"]].assign(**codes)
+
+
 def build_timestral_arrays(
     y_df: pd.DataFrame,
     cutoff: pd.Timestamp,
@@ -228,6 +248,7 @@ def build_timestral_arrays(
     x_df: pd.DataFrame | None = None,
     covariates: tuple[str, ...] = KNOWN_COVARIATES,
     past_df: pd.DataFrame | None = None,
+    categorical: tuple[str, ...] = (),
 ) -> TimestralInputs:
     """Convert long data into Timestral arrays for one backtest origin.
 
@@ -250,12 +271,15 @@ def build_timestral_arrays(
     past_df : pd.DataFrame | None
         Long frame `unique_id, ds, <columns>` whose columns become past-only covariates
         over the T context days (e.g. the output of `store_totals`).
+    categorical : tuple[str, ...]
+        Categorical columns of `x_df` passed as category codes over `T + H`, the same
+        code for the same category in every series (requires `x_df`).
 
     Returns
     -------
     TimestralInputs
-        Context `(B, 1, T)`, optional known covariates `(B, C, T + H)` and optional
-        past covariates `(B, P, T)`.
+        Context `(B, 1, T)`, optional known covariates `(B, C, T + H)`, optional past
+        covariates `(B, P, T)` and optional categorical covariates `(B, K, T + H)`.
 
     Raises
     ------
@@ -266,9 +290,16 @@ def build_timestral_arrays(
     ctx_dates = pd.DatetimeIndex(wide.columns)
     future_ds = pd.date_range(cutoff + pd.Timedelta(days=1), periods=horizon, freq="D")
     context = wide.to_numpy(dtype=np.float32)[:, None, :]
-    known, names = None, ()
+    known, names, codes = None, (), None
     if x_df is not None:
         all_dates = ctx_dates.append(future_ds)
+        if categorical:
+            codes = _covariate_tensor(
+                _category_codes(x_df, columns=categorical),
+                unique_ids=wide.index,
+                dates=all_dates,
+                columns=categorical,
+            )
         per_series = _covariate_tensor(
             x_df, unique_ids=wide.index, dates=all_dates, columns=covariates
         )
@@ -292,6 +323,8 @@ def build_timestral_arrays(
         covariate_names=names,
         future_ds=future_ds,
         past_covariates=past,
+        categorical_covariates=codes,
+        categorical_names=categorical if codes is not None else (),
     )
 
 

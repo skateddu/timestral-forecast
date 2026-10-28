@@ -14,6 +14,7 @@ from timestral_forecast.models.timestral_model import (
     resolve_device,
 )
 from timestral_forecast.preprocessing import (
+    EVENT_CATEGORIES,
     KNOWN_COVARIATES,
     build_timestral_arrays,
     store_of,
@@ -164,3 +165,28 @@ def test_backtest_timestral_masks_constant_price(
     )
 
     assert np.isnan(fake.calls[0]["known_covariates"][0, 0]).all()
+
+
+def test_backtest_timestral_passes_categorical_events(
+    make_long: Callable[..., pd.DataFrame], make_covariates: Callable[..., pd.DataFrame]
+) -> None:
+    df = make_long({"a": [1.0] * 6})
+    fake = FakeForecaster()
+    variant = TimestralVariant(
+        alias="TS",
+        model_id="m",
+        known_covariates=("snap",),
+        categorical_covariates=EVENT_CATEGORIES,
+    )
+
+    backtest_timestral(
+        fake,
+        variant=variant,
+        y_df=df,
+        cutoffs=[pd.Timestamp("2020-01-04")],
+        horizon=2,
+        x_df=make_covariates(df, extra_days=2),
+    )
+
+    assert fake.calls[0]["categorical_known_covariates"].shape == (1, len(EVENT_CATEGORIES), 4 + 2)
+    assert fake.calls[0]["known_covariates"].shape[1] == 1 + 4  # snap + calendar

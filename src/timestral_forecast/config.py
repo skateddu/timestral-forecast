@@ -80,10 +80,13 @@ class Settings(BaseSettings):
         "arima",
         "ets",
         "LightGBM-norm",
+        "LightGBM-norm-matched",
+        "LightGBM-norm-matched+cat",
         "Timestral-28M",
         "Timestral-28M+cov",
         "Timestral-28M+cov+past",
         "Timestral-28M-mv",
+        "Timestral-28M+cov+cat",
     )
     season_length: int = 7
     moving_average_window: int = 28

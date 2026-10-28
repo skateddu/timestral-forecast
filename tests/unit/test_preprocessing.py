@@ -6,6 +6,7 @@ import pytest
 
 from timestral_forecast.preprocessing import (
     CALENDAR_COVARIATES,
+    EVENT_CATEGORIES,
     KNOWN_COVARIATES,
     backtest_cutoffs,
     build_timestral_arrays,
@@ -168,3 +169,60 @@ def test_store_of_maps_series_to_store() -> None:
     s_df = pd.DataFrame({"unique_id": ["a", "b"], "store_id": ["CA_1", "TX_1"]})
 
     assert store_of(s_df).to_dict() == {"a": "CA_1", "b": "TX_1"}
+
+
+def test_build_timestral_arrays_categorical_codes_span_context_plus_horizon(
+    make_long: Callable[..., pd.DataFrame], make_covariates: Callable[..., pd.DataFrame]
+) -> None:
+    df = make_long({"a": [1.0] * 5, "b": [2.0] * 5})
+    x = make_covariates(df, extra_days=2)
+
+    inputs = build_timestral_arrays(
+        df,
+        cutoff=pd.Timestamp("2020-01-05"),
+        horizon=2,
+        x_df=x,
+        covariates=("snap",),
+        categorical=EVENT_CATEGORIES,
+    )
+
+    codes = inputs.categorical_covariates
+    assert codes.shape == (2, len(EVENT_CATEGORIES), 5 + 2)
+    assert inputs.categorical_names == EVENT_CATEGORIES
+    assert inputs.covariate_names == ("snap", *CALENDAR_COVARIATES)
+    np.testing.assert_array_equal(codes[0], codes[1])  # same code for the same category
+    event_day = codes[0, 0, 2]  # 2020-01-03
+    assert np.isfinite(codes).all()
+    assert (codes[0, 0, np.arange(7) != 2] != event_day).all()
+
+
+def test_build_timestral_arrays_without_categorical_has_none(
+    make_long: Callable[..., pd.DataFrame], make_covariates: Callable[..., pd.DataFrame]
+) -> None:
+    df = make_long({"a": [1.0] * 5})
+
+    inputs = build_timestral_arrays(
+        df, cutoff=pd.Timestamp("2020-01-05"), horizon=2, x_df=make_covariates(df)
+    )
+
+    assert inputs.categorical_covariates is None
+    assert inputs.categorical_names == ()
+
+
+def test_build_timestral_arrays_categorical_only_keeps_calendar_rows(
+    make_long: Callable[..., pd.DataFrame], make_covariates: Callable[..., pd.DataFrame]
+) -> None:
+    df = make_long({"a": [1.0] * 5})
+
+    inputs = build_timestral_arrays(
+        df,
+        cutoff=pd.Timestamp("2020-01-05"),
+        horizon=2,
+        x_df=make_covariates(df, extra_days=2),
+        covariates=(),
+        categorical=("event_name",),
+    )
+
+    assert inputs.covariate_names == CALENDAR_COVARIATES
+    assert inputs.known_covariates.shape == (1, len(CALENDAR_COVARIATES), 5 + 2)
+    assert inputs.categorical_covariates.shape == (1, 1, 5 + 2)

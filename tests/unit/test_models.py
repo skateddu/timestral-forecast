@@ -10,10 +10,13 @@ from timestral_forecast.models.lgbm import (
     LEVEL_FLOOR,
     LGBM_VARIANTS,
     LGBMVariant,
+    _training_frame,
     add_price_ratio,
     backtest_lightgbm,
+    build_mlforecast,
     recent_level,
 )
+from timestral_forecast.preprocessing import calendar_features
 
 
 @pytest.fixture
@@ -108,3 +111,41 @@ def test_backtest_lightgbm_variants_forecast_every_step(
 
     assert len(fc) == 3 * 7
     assert fc[variant.alias].between(0, 100).all()  # rescaled back to units
+
+
+def test_matched_variants_see_the_same_inputs_as_timestral(
+    weekly_series: pd.DataFrame, make_covariates: Callable[..., pd.DataFrame]
+) -> None:
+    variants = {v.alias: v for v in LGBM_VARIANTS}
+    s_df = pd.DataFrame(
+        {"unique_id": ["s0", "s1", "s2"], "item_id": ["a", "b", "c"], "store_id": "CA_1"}
+    )
+    x_df = make_covariates(weekly_series)
+
+    matched = _training_frame(
+        weekly_series, x_df=x_df, s_df=s_df, variant=variants["LightGBM-norm-matched"]
+    )
+    cat = _training_frame(
+        weekly_series, x_df=x_df, s_df=s_df, variant=variants["LightGBM-norm-matched+cat"]
+    )
+
+    assert list(matched.columns) == ["unique_id", "ds", "y", "sell_price", "snap", "is_event"]
+    assert list(cat.columns) == [
+        "unique_id",
+        "ds",
+        "y",
+        "sell_price",
+        "snap",
+        "event_name",
+        "event_type",
+    ]
+    assert variants["LightGBM-norm-matched"].train_days == 1024
+
+
+def test_cyclic_calendar_matches_timestral_encoding() -> None:
+    mlf = build_mlforecast(alias="m", tweedie_power=1.1, n_jobs=1, cyclic_calendar=True)
+    dates = pd.date_range("2020-01-01", periods=10, freq="D")
+
+    values = np.stack([f(dates) for f in mlf.ts.date_features])
+
+    np.testing.assert_allclose(values, calendar_features(dates))

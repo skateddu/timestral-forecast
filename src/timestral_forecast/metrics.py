@@ -212,3 +212,80 @@ def aggregate_periods(df: pd.DataFrame, models: Sequence[str], days: int) -> pd.
     values = df[cols].astype(float)
     keys = [df["unique_id"], df["cutoff"], period.rename("period")]
     return values.groupby(keys, observed=True).sum().reset_index()
+
+
+def bootstrap_scores(
+    df: pd.DataFrame, models: Sequence[str], n_boot: int = 1000, seed: int = 0
+) -> pd.DataFrame:
+    """Mean score per origin of each model on series-level bootstrap resamples.
+
+    Each resample draws the series with replacement and keeps all their days and origins,
+    so the uncertainty reflects which items happen to be in the portfolio. Paired
+    differences between models (see `bootstrap_difference`) are much tighter than the
+    spread of each score, because every model is scored on the same resample.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Evaluation frame `unique_id, cutoff, y, <models>` (daily or from `aggregate_periods`).
+    models : Sequence[str]
+        Model columns to score.
+    n_boot : int
+        Number of resamples.
+    seed : int
+        Random seed.
+
+    Returns
+    -------
+    pd.DataFrame
+        `(n_boot, len(models))` mean score per origin, one column per model.
+    """
+    models = list(models)
+    values = df[["y", *models]].astype(float).clip(lower=0)
+    abs_err = values[models].sub(values["y"], axis=0).abs().add_suffix("|abs")
+    err = values[models].sub(values["y"], axis=0)
+    parts = pd.concat([values[["y"]], err, abs_err], axis=1)
+    sums = parts.groupby([df["unique_id"], df["cutoff"]], observed=True).sum()
+    cube = sums.unstack("cutoff", fill_value=0.0)  # series x (column, cutoff)
+    rng = np.random.default_rng(seed)
+    n_series = len(cube)
+    weights = rng.multinomial(n_series, np.full(n_series, 1 / n_series), size=n_boot)
+    totals = weights @ cube.to_numpy()  # (n_boot, columns x cutoffs)
+    totals = pd.DataFrame(totals, columns=cube.columns)
+    volume = totals["y"].to_numpy()
+    out = {}
+    for model in models:
+        wmape_b = totals[f"{model}|abs"].to_numpy() / volume
+        bias_b = totals[model].to_numpy() / volume
+        out[model] = (wmape_b + np.abs(bias_b)).mean(axis=1)
+    return pd.DataFrame(out)
+
+
+def bootstrap_difference(boot: pd.DataFrame, reference: str, level: float = 0.95) -> pd.DataFrame:
+    """Paired score difference of each model versus `reference`, with a percentile interval.
+
+    Parameters
+    ----------
+    boot : pd.DataFrame
+        Output of `bootstrap_scores`.
+    reference : str
+        Model every other column is compared with.
+    level : float
+        Confidence level of the interval.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per model: median difference, interval bounds and the share of resamples
+        in which the model scores better (lower) than `reference`.
+    """
+    diff = boot.sub(boot[reference], axis=0).drop(columns=reference)
+    tail = (1 - level) / 2
+    return pd.DataFrame(
+        {
+            "difference": diff.median(),
+            "lower": diff.quantile(tail),
+            "upper": diff.quantile(1 - tail),
+            "share better": (diff < 0).mean(),
+        }
+    ).sort_values("difference")

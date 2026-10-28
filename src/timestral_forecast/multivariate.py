@@ -92,7 +92,9 @@ def stack_variates(inputs: TimestralInputs, groups: Sequence[np.ndarray]) -> Tim
 
     Covariates are taken from the first member of each group, so they must be shared
     by the whole group (store-level rows such as SNAP days, events, calendar, store
-    totals); item-level rows such as price do not fit a multivariate element.
+    totals); item-level rows such as price do not fit a multivariate element. Timestral
+    cannot target-encode categorical rows of a multivariate element, so it reads their
+    raw codes.
 
     Parameters
     ----------
@@ -117,7 +119,7 @@ def stack_variates(inputs: TimestralInputs, groups: Sequence[np.ndarray]) -> Tim
     index = np.stack(groups)
     shared = {
         name: None if (arr := getattr(inputs, name)) is None else arr[index[:, 0]]
-        for name in ("known_covariates", "past_covariates")
+        for name in ("known_covariates", "past_covariates", "categorical_covariates")
     }
     return replace(
         inputs,

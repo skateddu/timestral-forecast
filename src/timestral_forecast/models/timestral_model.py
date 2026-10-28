@@ -40,6 +40,10 @@ class TimestralVariant:
         added automatically); empty for the history-only variant.
     past_covariates : bool
         Add the store's daily department total as a past-only covariate.
+    categorical_covariates : tuple[str, ...]
+        Categorical columns of `x_df` (e.g. event name and type) passed as category codes
+        over context and horizon, which Timestral target-encodes per series; calendar
+        encodings are added too.
     group_size : int
         Variates per batch element: 1 is univariate, more forecasts affine items of
         the same store jointly (only store-level covariates are allowed then).
@@ -55,6 +59,7 @@ class TimestralVariant:
     model_id: str
     known_covariates: tuple[str, ...] = ()
     past_covariates: bool = False
+    categorical_covariates: tuple[str, ...] = ()
     group_size: int = 1
     symmetric_averaging: bool = True
     mask_constant_price: bool = False
@@ -143,7 +148,7 @@ def predict_quantiles(
     forecaster : QuantileForecaster
         Loaded Timestral model.
     inputs : TimestralInputs
-        Context `(B, V, T)` and optional known and past covariates.
+        Context `(B, V, T)` and optional known, past and categorical covariates.
     horizon : int
         Days to forecast.
     batch_size : int
@@ -165,6 +170,8 @@ def predict_quantiles(
             kwargs["known_covariates"] = inputs.known_covariates[part]
         if inputs.past_covariates is not None:
             kwargs["past_covariates"] = inputs.past_covariates[part]
+        if inputs.categorical_covariates is not None:
+            kwargs["categorical_known_covariates"] = inputs.categorical_covariates[part]
         fc = forecaster.forecast(inputs.context[part], prediction_length=horizon, **kwargs)
         quantiles = _to_numpy(fc.quantiles)
         chunks.append(quantiles.reshape(-1, *quantiles.shape[2:]))
@@ -229,7 +236,8 @@ def prepare_inputs(
     horizon : int
         Days to forecast.
     x_df : pd.DataFrame | None
-        Known covariates; required when `variant.known_covariates` is not empty.
+        Known covariates; required when `variant.known_covariates` or
+        `variant.categorical_covariates` is not empty.
     past_df : pd.DataFrame | None
         Past-only covariates; required when `variant.past_covariates` is set.
     store_of : pd.Series | None
@@ -246,9 +254,10 @@ def prepare_inputs(
         y_df,
         cutoff=cutoff,
         horizon=horizon,
-        x_df=x_df if variant.known_covariates else None,
+        x_df=x_df if variant.known_covariates or variant.categorical_covariates else None,
         covariates=variant.known_covariates,
         past_df=past_df if variant.past_covariates else None,
+        categorical=variant.categorical_covariates,
     )
     if variant.mask_constant_price:
         window = context_window or inputs.context.shape[-1]

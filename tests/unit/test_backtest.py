@@ -91,7 +91,8 @@ def test_run_benchmark_merges_jobs_and_records_timings(
 
     assert merged["M1"].eq(1.0).all()
     assert list(timings.index) == ["m1"]
-    assert (tmp_path / "processed" / "fc_m1.parquet").exists()
+    folder = backtest.cache_dir(settings, cutoffs=sorted(truth["cutoff"].unique()))
+    assert (folder / "fc_m1.parquet").exists()
 
 
 def test_run_benchmark_only_and_prefix_select_jobs_and_cache_files(
@@ -104,8 +105,10 @@ def test_run_benchmark_only_and_prefix_select_jobs_and_cache_files(
     fake_jobs = {"m1": lambda: keys.assign(M1=1.0), "m2": lambda: keys.assign(M2=2.0)}
     monkeypatch.setattr(backtest, "benchmark_jobs", lambda settings, data, cutoffs: fake_jobs)
 
+    settings = Settings(data_dir=tmp_path, horizon=2)
+
     merged, _ = backtest.run_benchmark(
-        Settings(data_dir=tmp_path, horizon=2),
+        settings,
         data=data,
         cutoffs=cutoffs,
         only=["m2"],
@@ -114,7 +117,7 @@ def test_run_benchmark_only_and_prefix_select_jobs_and_cache_files(
 
     assert "M1" not in merged.columns
     assert merged["cutoff"].unique().tolist() == cutoffs
-    assert (tmp_path / "processed" / "h_fc_m2.parquet").exists()
+    assert (backtest.cache_dir(settings, cutoffs=cutoffs) / "h_fc_m2.parquet").exists()
 
 
 def test_run_holiday_benchmark_uses_holiday_origins_jobs_and_prefix(
@@ -143,10 +146,13 @@ def test_benchmark_jobs_lists_every_model_family(make_long: Callable[..., pd.Dat
         "LightGBM",
         "LightGBM-norm",
         "LightGBM-norm-direct",
+        "LightGBM-norm-matched",
+        "LightGBM-norm-matched+cat",
         "Timestral-28M",
         "Timestral-28M+cov",
         "Timestral-28M+cov+past",
         "Timestral-28M-mv",
+        "Timestral-28M+cov+cat",
     ]
 
 
@@ -209,3 +215,30 @@ def test_timestral_jobs_pass_covariate_safeguards(
     backtest.benchmark_jobs(settings, data=data, cutoffs=[pd.Timestamp("2020-01-05")])[alias]()
 
     assert calls == [expected]
+
+
+def test_timestral_variants_categorical_events_replace_the_event_flag() -> None:
+    variants = {v.alias: v for v in timestral_variants(Settings())}
+
+    cat, cov = variants["Timestral-28M+cov+cat"], variants["Timestral-28M+cov"]
+
+    assert cat.categorical_covariates == ("event_name", "event_type")
+    assert cat.known_covariates == ("sell_price", "snap")
+    assert cat.mask_constant_price == cov.mask_constant_price
+    assert cat.symmetric_averaging == cov.symmetric_averaging
+
+
+def test_cache_dir_depends_on_subset_horizon_and_origins(tmp_path: Path) -> None:
+    base = Settings(data_dir=tmp_path)
+    cutoffs = [pd.Timestamp("2016-04-24")]
+
+    folder = backtest.cache_dir(base, cutoffs=cutoffs)
+
+    assert folder.parent == base.processed_dir
+    assert folder.name.startswith("FOODS_3_CA_1-TX_1-WI_1_")
+    assert folder == backtest.cache_dir(Settings(data_dir=tmp_path), cutoffs=cutoffs)
+    assert folder != backtest.cache_dir(base, cutoffs=[pd.Timestamp("2016-03-27")])
+    assert folder != backtest.cache_dir(Settings(data_dir=tmp_path, horizon=7), cutoffs=cutoffs)
+    assert folder != backtest.cache_dir(
+        Settings(data_dir=tmp_path, store_ids=("CA_1",)), cutoffs=cutoffs
+    )

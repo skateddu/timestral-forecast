@@ -5,11 +5,18 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import lightgbm as lgb
+import numpy as np
 import pandas as pd
 from mlforecast import MLForecast
 from mlforecast.lag_transforms import ExponentiallyWeightedMean, RollingMean, RollingStd
 
-from timestral_forecast.preprocessing import split_at, trim_leading_zeros
+from timestral_forecast.preprocessing import (
+    EVENT_CATEGORIES,
+    KNOWN_COVARIATES,
+    calendar_features,
+    split_at,
+    trim_leading_zeros,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +31,35 @@ LAG_TRANSFORMS = {
     7: [RollingMean(window_size=4 * 7)],
     28: [RollingMean(window_size=28)],
 }
-DYNAMIC_FEATURES = ["sell_price", "price_ratio", "snap", "is_event"]
+DYNAMIC_FEATURES = ("sell_price", "price_ratio", "snap", "is_event")
 STATIC_FEATURES = ["item_id", "store_id"]
+DATE_FEATURES = ["dayofweek", "day", "month", "year"]
 LEVEL_DAYS = 56
 # keeps the scale positive for series that sold nothing in the last LEVEL_DAYS
 LEVEL_FLOOR = 0.1
+
+
+def dow_sin(dates: pd.DatetimeIndex) -> np.ndarray:
+    """Sine of the day of week, as fed to Timestral."""
+    return calendar_features(pd.DatetimeIndex(dates))[0]
+
+
+def dow_cos(dates: pd.DatetimeIndex) -> np.ndarray:
+    """Cosine of the day of week, as fed to Timestral."""
+    return calendar_features(pd.DatetimeIndex(dates))[1]
+
+
+def doy_sin(dates: pd.DatetimeIndex) -> np.ndarray:
+    """Sine of the day of year, as fed to Timestral."""
+    return calendar_features(pd.DatetimeIndex(dates))[2]
+
+
+def doy_cos(dates: pd.DatetimeIndex) -> np.ndarray:
+    """Cosine of the day of year, as fed to Timestral."""
+    return calendar_features(pd.DatetimeIndex(dates))[3]
+
+
+CYCLIC_DATE_FEATURES = [dow_sin, dow_cos, doy_sin, doy_cos]
 
 
 @dataclass(frozen=True)
@@ -46,22 +77,51 @@ class LGBMVariant:
         One model per horizon step (`max_horizon`) instead of recursive forecasting.
     train_days : int | None
         Train on the last `train_days` before the origin only (bounds the direct cost).
+    covariates : tuple[str, ...]
+        Known-future columns of `x_df` used as features; `price_ratio` is derived from
+        `sell_price`, which must then be listed too. Categorical columns (event name and
+        type) are passed to LightGBM as categories.
+    cyclic_calendar : bool
+        Sine/cosine of day of week and day of year, exactly as fed to Timestral, instead of
+        day of week, day of month, month and year (which together single out each holiday).
+    static_features : bool
+        Use item and store ids as categorical features.
     """
 
     alias: str
     normalize: bool = False
     direct: bool = False
     train_days: int | None = None
+    covariates: tuple[str, ...] = DYNAMIC_FEATURES
+    cyclic_calendar: bool = False
+    static_features: bool = True
 
+
+# Same information as Timestral-28M+cov and +cov+cat: no ids, no day/month/year, raw price
+# only, and the 1,024 days of Timestral's context (its `max_context`).
+_MATCHED = {
+    "normalize": True,
+    "train_days": 1024,
+    "cyclic_calendar": True,
+    "static_features": False,
+}
 
 LGBM_VARIANTS = (
     LGBMVariant(alias="LightGBM"),
     LGBMVariant(alias="LightGBM-norm", normalize=True),
     LGBMVariant(alias="LightGBM-norm-direct", normalize=True, direct=True, train_days=730),
+    LGBMVariant(alias="LightGBM-norm-matched", covariates=KNOWN_COVARIATES, **_MATCHED),
+    LGBMVariant(
+        alias="LightGBM-norm-matched+cat",
+        covariates=("sell_price", "snap", *EVENT_CATEGORIES),
+        **_MATCHED,
+    ),
 )
 
 
-def build_mlforecast(alias: str, tweedie_power: float, n_jobs: int, seed: int = 0) -> MLForecast:
+def build_mlforecast(
+    alias: str, tweedie_power: float, n_jobs: int, seed: int = 0, cyclic_calendar: bool = False
+) -> MLForecast:
     """Build a global LightGBM with Tweedie loss (log link, suited to counts with many zeros).
 
     Parameters
@@ -74,6 +134,8 @@ def build_mlforecast(alias: str, tweedie_power: float, n_jobs: int, seed: int = 
         LightGBM threads.
     seed : int
         Random seed of row and column subsampling.
+    cyclic_calendar : bool
+        Sine/cosine date features instead of day of week, day, month and year.
 
     Returns
     -------
@@ -99,14 +161,18 @@ def build_mlforecast(alias: str, tweedie_power: float, n_jobs: int, seed: int = 
         freq="D",
         lags=LAGS,
         lag_transforms=LAG_TRANSFORMS,
-        date_features=["dayofweek", "day", "month", "year"],
+        date_features=CYCLIC_DATE_FEATURES if cyclic_calendar else DATE_FEATURES,
     )
 
 
-def _training_frame(y_df: pd.DataFrame, x_df: pd.DataFrame, s_df: pd.DataFrame) -> pd.DataFrame:
-    """Join target, dynamic covariates and categorical static features."""
-    cols = ["unique_id", "ds", "sell_price", "snap", "is_event"]
+def _training_frame(
+    y_df: pd.DataFrame, x_df: pd.DataFrame, s_df: pd.DataFrame, variant: LGBMVariant
+) -> pd.DataFrame:
+    """Join target, the variant's covariates and, if used, categorical static features."""
+    cols = ["unique_id", "ds", *(c for c in variant.covariates if c != "price_ratio")]
     df = y_df.merge(x_df[cols], on=["unique_id", "ds"], how="left")
+    if not variant.static_features:
+        return df
     statics = s_df[["unique_id", *STATIC_FEATURES]].astype(
         {c: "category" for c in STATIC_FEATURES}
     )
@@ -166,14 +232,19 @@ def _fit_predict(
     n_jobs: int,
 ) -> pd.DataFrame:
     """Fit one variant on `train` and forecast `horizon` days with the known future features."""
-    mlf = build_mlforecast(alias=variant.alias, tweedie_power=tweedie_power, n_jobs=n_jobs)
+    mlf = build_mlforecast(
+        alias=variant.alias,
+        tweedie_power=tweedie_power,
+        n_jobs=n_jobs,
+        cyclic_calendar=variant.cyclic_calendar,
+    )
     mlf.fit(
         train,
-        static_features=STATIC_FEATURES,
+        static_features=STATIC_FEATURES if variant.static_features else [],
         weight_col="weight" if variant.normalize else None,
         max_horizon=horizon if variant.direct else None,
     )
-    return mlf.predict(h=horizon, X_df=future[["unique_id", "ds", *DYNAMIC_FEATURES]])
+    return mlf.predict(h=horizon, X_df=future[["unique_id", "ds", *variant.covariates]])
 
 
 def backtest_lightgbm(
@@ -211,7 +282,7 @@ def backtest_lightgbm(
     pd.DataFrame
         `unique_id, ds, cutoff, <variant.alias>`.
     """
-    full = _training_frame(y_df, x_df=x_df, s_df=s_df)
+    full = _training_frame(y_df, x_df=x_df, s_df=s_df, variant=variant)
     out = []
     for cutoff in cutoffs:
         train, future = split_at(full, cutoff=cutoff, horizon=horizon)
@@ -219,7 +290,8 @@ def backtest_lightgbm(
             train = train[train["ds"] > cutoff - pd.Timedelta(days=variant.train_days)]
         train = trim_leading_zeros(train)
         future = future[future["unique_id"].isin(train["unique_id"].unique())]
-        train, future = add_price_ratio(train, future)
+        if "price_ratio" in variant.covariates:
+            train, future = add_price_ratio(train, future)
         if variant.normalize:
             level = recent_level(train, cutoff=cutoff)
             train = train.assign(weight=train["unique_id"].map(level))

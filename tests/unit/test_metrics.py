@@ -5,6 +5,8 @@ import pytest
 from timestral_forecast.metrics import (
     aggregate_periods,
     bias,
+    bootstrap_difference,
+    bootstrap_scores,
     coverage,
     evaluate,
     fold_table,
@@ -126,3 +128,54 @@ def test_aggregate_periods_daily_errors_cancel_at_weekly_level() -> None:
 
     assert wmape(df["y"].to_numpy(), df["M"].to_numpy()) > 0
     assert wmape(weekly["y"].to_numpy(), weekly["M"].to_numpy()) == 0
+
+
+def _portfolio(n_series: int = 30, n_days: int = 6) -> pd.DataFrame:
+    rng = np.random.default_rng(1)
+    rows = []
+    for cutoff in pd.to_datetime(["2020-01-01", "2020-02-01"]):
+        for i in range(n_series):
+            y = rng.poisson(3, size=n_days).astype(float)
+            rows.append(
+                pd.DataFrame(
+                    {
+                        "unique_id": f"s{i}",
+                        "cutoff": cutoff,
+                        "y": y,
+                        "perfect": y,
+                        "double": 2 * y,
+                        "noisy": y + rng.normal(0, 1, size=n_days),
+                    }
+                )
+            )
+    return pd.concat(rows, ignore_index=True)
+
+
+def test_bootstrap_scores_are_exact_where_the_score_does_not_depend_on_the_sample() -> None:
+    boot = bootstrap_scores(_portfolio(), models=["perfect", "double"], n_boot=50)
+
+    assert boot.shape == (50, 2)
+    np.testing.assert_allclose(boot["perfect"], 0.0)
+    np.testing.assert_allclose(boot["double"], 2.0)  # WMAPE 1 + bias 1 in every resample
+
+
+def test_bootstrap_scores_centre_on_the_fold_table_score() -> None:
+    df = _portfolio()
+
+    boot = bootstrap_scores(df, models=["noisy"], n_boot=400)
+
+    expected = fold_table(df, models=["noisy"]).loc["noisy", "mean"]
+    assert boot["noisy"].median() == pytest.approx(expected, rel=0.05)
+    assert boot["noisy"].std() > 0
+
+
+def test_bootstrap_difference_ranks_models_against_the_reference() -> None:
+    boot = bootstrap_scores(_portfolio(), models=["perfect", "double", "noisy"], n_boot=200)
+
+    diff = bootstrap_difference(boot, reference="noisy")
+
+    assert list(diff.index) == ["perfect", "double"]
+    assert diff.loc["perfect", "share better"] == 1.0
+    assert diff.loc["double", "share better"] == 0.0
+    assert (diff["lower"] <= diff["difference"]).all()
+    assert (diff["difference"] <= diff["upper"]).all()

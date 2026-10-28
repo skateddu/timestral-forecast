@@ -1,5 +1,6 @@
 """Run every model family on the same origins and merge forecasts with actuals."""
 
+import hashlib
 import logging
 import time
 from collections.abc import Callable, Collection, Sequence
@@ -24,6 +25,7 @@ from timestral_forecast.models.timestral_model import (
     load_timestral,
 )
 from timestral_forecast.preprocessing import (
+    EVENT_CATEGORIES,
     KNOWN_COVARIATES,
     backtest_cutoffs,
     split_at,
@@ -62,9 +64,10 @@ def timestral_variants(settings: Settings) -> list[TimestralVariant]:
     """List the Timestral configurations of the benchmark.
 
     History-only for every checkpoint in `timestral_models`; known covariates for those
-    in `timestral_covariate_models`; and, for the first covariate checkpoint, two
-    extensions: an extra past-only covariate (store total) and a multivariate run
-    (affine items of the same store forecast jointly).
+    in `timestral_covariate_models`; and, for the first covariate checkpoint, three
+    extensions: an extra past-only covariate (store total), a multivariate run (affine
+    items of the same store forecast jointly) and events as categorical covariates
+    (event name and type in place of the 0/1 event row).
 
     Parameters
     ----------
@@ -101,6 +104,14 @@ def timestral_variants(settings: Settings) -> list[TimestralVariant]:
                 known_covariates=STORE_COVARIATES,
                 past_covariates=True,
                 group_size=settings.timestral_group_size,
+            )
+        )
+        variants.append(
+            replace(
+                cov,
+                alias=f"{cov.alias}+cat",
+                known_covariates=tuple(c for c in cov.known_covariates if c != "is_event"),
+                categorical_covariates=EVENT_CATEGORIES,
             )
         )
     return variants
@@ -220,6 +231,26 @@ def _timestral_job(
     return run
 
 
+def cache_dir(settings: Settings, cutoffs: Sequence[pd.Timestamp]) -> Path:
+    """Cache folder of one data subset, horizon and set of origins, so runs never mix.
+
+    Parameters
+    ----------
+    settings : Settings
+        Experiment configuration (department, stores, horizon).
+    cutoffs : Sequence[pd.Timestamp]
+        Backtest origins.
+
+    Returns
+    -------
+    Path
+        `processed/<dept>_<stores>_<digest>`, the digest of horizon and origins.
+    """
+    origins = ",".join(str(pd.Timestamp(c).date()) for c in cutoffs)
+    digest = hashlib.sha1(f"h={settings.horizon}|{origins}".encode()).hexdigest()[:8]
+    return settings.processed_dir / f"{settings.dept_id}_{'-'.join(settings.store_ids)}_{digest}"
+
+
 def run_benchmark(
     settings: Settings,
     data: M5Data,
@@ -241,7 +272,8 @@ def run_benchmark(
     only : Collection[str] | None
         Cache names of the jobs to run; None runs them all.
     cache_prefix : str
-        Prefix of the cache files, to keep different sets of origins apart.
+        Prefix of the cache file names; the folder (see `cache_dir`) already depends on
+        subset, horizon and origins.
     refresh : bool
         Recompute every selected job even if cached.
 
@@ -255,7 +287,8 @@ def run_benchmark(
         cutoffs = backtest_cutoffs(
             data.y_df["ds"].max(), horizon=settings.horizon, n_windows=settings.n_windows
         )
-    timings_path = settings.processed_dir / f"{cache_prefix}timings.json"
+    folder = cache_dir(settings, cutoffs=cutoffs)
+    timings_path = folder / f"{cache_prefix}timings.json"
     timings = (
         pd.read_json(timings_path, typ="series")
         if timings_path.exists()
@@ -268,9 +301,7 @@ def run_benchmark(
     }
     frames = []
     for name, job in jobs.items():
-        frame, seconds = cached(
-            settings.processed_dir / f"{cache_prefix}fc_{name}.parquet", job, refresh=refresh
-        )
+        frame, seconds = cached(folder / f"{cache_prefix}fc_{name}.parquet", job, refresh=refresh)
         if seconds is not None:
             timings[name] = seconds
             timings.to_json(timings_path)
